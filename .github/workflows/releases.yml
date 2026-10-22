@@ -1,0 +1,107 @@
+name: Build upstream FreeTDS releases
+
+on:
+  push:
+    paths:
+      - '.github/workflows/releases.yml'
+      - 'scripts/**'
+      - 'tests/**'
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Optional GitHub release tag to build or rebuild (e.g. v1.5.16)'
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: freetds-releases
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    if: github.event_name != 'push' || github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    outputs:
+      tags: ${{ steps.releases.outputs.tags }}
+      has_releases: ${{ steps.releases.outputs.has_releases }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Test release automation
+        run: python3 -m unittest discover -s tests -v
+      - name: Find missing upstream releases
+        id: releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+        run: python3 scripts/releases.py discover --tag "$UPSTREAM_TAG"
+
+  build:
+    needs: discover
+    if: needs.discover.outputs.has_releases == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ${{ fromJSON(needs.discover.outputs.tags) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check out upstream release
+        uses: actions/checkout@v7
+        with:
+          repository: FreeTDS/freetds
+          ref: ${{ matrix.tag }}
+          path: upstream
+          persist-credentials: false
+      - name: Build and package using Debian trixie in Docker
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ matrix.tag }}
+        run: bash scripts/build.sh "$UPSTREAM_TAG" upstream
+      - name: Verify archive and compile TinyTDS in Ruby development container
+        env:
+          UPSTREAM_TAG: ${{ matrix.tag }}
+        run: bash scripts/smoke-test.sh "$UPSTREAM_TAG"
+      - name: Verify runtime in Ruby slim container
+        env:
+          UPSTREAM_TAG: ${{ matrix.tag }}
+        run: bash scripts/smoke-test.sh "$UPSTREAM_TAG" ruby:3.4.11-slim-trixie runtime
+      - uses: actions/upload-artifact@v7
+        with:
+          name: freetds-${{ matrix.tag }}-debian-trixie-amd64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    needs: [discover, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    strategy:
+      max-parallel: 1
+      matrix:
+        tag: ${{ fromJSON(needs.discover.outputs.tags) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: freetds-${{ matrix.tag }}-debian-trixie-amd64
+          path: dist
+      - name: Publish with upstream release name and tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ matrix.tag }}
+        run: python3 scripts/releases.py publish --tag "$UPSTREAM_TAG"
