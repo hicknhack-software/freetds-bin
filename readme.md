@@ -1,26 +1,28 @@
 # FreeTDS binaries for Debian trixie
 
-Build [FreeTDS](https://github.com/FreeTDS/freetds) once per upstream GitHub release and reuse the archive in development and production images, instead of compiling FreeTDS in every application build.
+Build [FreeTDS](https://github.com/FreeTDS/freetds) once per stable upstream Git tag and reuse the archive in development and production images, instead of compiling FreeTDS in every application build.
 
 The initial target is **Debian 13 (trixie), Linux x86-64 (`amd64`)**. Builds use `docker run` with `debian:trixie-slim`. The installation prefix is `/usr/local`, with **TDS 7.3**, OpenSSL support, and readline disabled. The archive includes command-line tools such as `tsql`, shared and static libraries, headers, linker symlinks, configuration, documentation, and upstream licenses. It supports building native gems such as TinyTDS. The runtime dependency is Debian's `libssl3t64` in addition to libc; install `ca-certificates` for TLS certificate validation.
 
 ## Release automation
 
-[The workflow](.github/workflows/releases.yml) polls `FreeTDS/freetds` once a week, on Mondays at 06:23 UTC. GitHub's `release` event applies to the repository containing the workflow; monitoring a separate upstream repository requires polling or an external webhook. Polling needs no upstream changes or additional credentials. Scheduled runs can be delayed; see [GitHub's trigger documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
+[The workflow](.github/workflows/releases.yml) polls the Git tags in `FreeTDS/freetds` once a week, on Mondays at 06:23 UTC. It does not require upstream GitHub release entries. Polling needs no upstream changes or additional credentials. Scheduled runs can be delayed; see [GitHub's trigger documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
 
-On its first run, the workflow builds the latest stable GitHub release. Subsequent runs build all missing stable releases published since that initial release, including releases missed during downtime. Drafts and prereleases are skipped automatically. Complete releases are skipped; incomplete uploads are retried. To rebuild an existing release or backfill an older one, run the workflow manually with `upstream_tag`, for example `v1.5.16`.
+On its first run, the workflow builds the **highest stable version tag**, using numeric version ordering (`v1.5.19` is newer than `v1.5.9`). Stable tags have the form `vMAJOR.MINOR` or `vMAJOR.MINOR.PATCH`; prerelease and unrelated tags are ignored. All tag pages are inspected, so discovery does not depend on API ordering.
 
-For each release, the workflow:
+Subsequent runs build missing stable tags at or above the initial version, including newer versions missed between weekly checks. Complete releases in this repository are skipped; drafts and incomplete uploads are retried. The initial monitoring boundary is preserved when manually backfilling an older tag and when upgrading from the previous release-based workflow. To rebuild an existing tag or backfill an older one, run the workflow manually with `upstream_tag`, for example `v1.5.19`.
 
-1. Checks out its upstream tag.
-2. Downloads the official source archive attached to that release and verifies its GitHub asset SHA-256 digest when provided. Installs the C compiler and OpenSSL development files in a fresh Debian trixie container, then runs `configure`, `make`, and `make DESTDIR=... install`.
+For each selected tag, the workflow:
+
+1. Checks out the upstream Git tag.
+2. Installs Autotools, gettext, gperf, the C compiler, and OpenSSL development files in a fresh Debian trixie container. Bootstraps the checked-out source with `autogen.sh`, then runs `configure`, `make`, and `make DESTDIR=... install`.
 3. Packages the installation, matching upstream source, and SHA-256 checksums.
 4. Installs the archive in `ghcr.io/hicknhack-software/ruby-dev:3.4.11`, checks its version, TLS configuration, and shared libraries, then compiles and loads TinyTDS against it. Also tests runtime loading in `ruby:3.4.11-slim-trixie`.
-5. Creates a release here with the **same title and tag as upstream**, then uploads the files. A separate publishing job has `contents: write`; new releases stay in draft until uploads succeed.
+5. Creates a release here with the **upstream tag as both title and tag**, then uploads the files. A separate publishing job has `contents: write`; new releases stay in draft until uploads succeed.
 
-Put these files on this repository's **default branch**, enable Actions, and allow the publishing job to use `contents: write`. Start the initial run using **Actions → Build upstream FreeTDS releases → Run workflow**. The workflow uses the built-in `GITHUB_TOKEN`; no personal token or extra secrets are needed. GitHub may disable scheduled workflows in inactive public repositories after 60 days, so check that the schedule remains enabled.
+Put these files on this repository's **default branch**, enable Actions, and allow the publishing job to use `contents: write`. Start the initial run using **Actions → Build upstream FreeTDS tags → Run workflow**. The workflow uses the built-in `GITHUB_TOKEN`; no personal token or extra secrets are needed. GitHub may disable scheduled workflows in inactive public repositories after 60 days, so check that the schedule remains enabled.
 
-This monitors **GitHub releases**, rather than every Git tag or upload to freetds.org. As checked on October 22, 2026, `v1.5.16` is the latest GitHub release; `v1.5.19` has a Git tag but no GitHub release entry. For tag-only local builds, set `FREETDS_SOURCE=git`. The examples below use `v1.5.16`; download URLs become available after this repository publishes that release. Adjust `FREETDS_REPOSITORY` if this project's GitHub location differs.
+The workflow uses the upstream Tags API for discovery and the Git reference API to validate manual builds and publication. The Releases API is used only for this repository's binary releases. No upstream release asset or freetds.org download is required. Adjust `FREETDS_REPOSITORY` in the examples if this project's GitHub location differs. Download URLs become available after this repository publishes the corresponding tag.
 
 ## Install manually
 
@@ -28,7 +30,7 @@ On Debian trixie amd64:
 
 ```sh
 FREETDS_REPOSITORY=hicknhack-software/freetds-bin
-FREETDS_TAG=v1.5.16
+FREETDS_TAG=v1.5.19
 ARCHIVE="freetds-${FREETDS_TAG}-debian-trixie-amd64.tar.gz"
 URL="https://github.com/${FREETDS_REPOSITORY}/releases/download/${FREETDS_TAG}"
 
@@ -68,7 +70,7 @@ ARG RUBY_VERSION=3.4.11
 FROM ghcr.io/hicknhack-software/ruby-dev:${RUBY_VERSION}
 
 ARG FREETDS_REPOSITORY=hicknhack-software/freetds-bin
-ARG FREETDS_TAG=v1.5.16
+ARG FREETDS_TAG=v1.5.19
 RUN <<'INSTALL'
   set -eu
   . /etc/os-release
@@ -109,7 +111,7 @@ RUN apt-get update -qq && \
 
 FROM base AS freetds
 ARG FREETDS_REPOSITORY=hicknhack-software/freetds-bin
-ARG FREETDS_TAG=v1.5.16
+ARG FREETDS_TAG=v1.5.19
 RUN <<'INSTALL'
   set -eu
   test "$(dpkg --print-architecture)" = amd64
@@ -149,33 +151,28 @@ FreeTDS libraries belong in **`/usr/local/lib/`**, including their versioned sym
 
 ## Build and verify locally
 
-Requirements: Bash, Python 3, Docker running Linux containers, and network access to GitHub, Debian, GHCR, Docker Hub, and RubyGems.
+Requirements: Bash, Docker running Linux containers, and network access to GitHub, Debian, GHCR, Docker Hub, and RubyGems.
 
 ```sh
-bash scripts/build.sh v1.5.16
-bash scripts/smoke-test.sh v1.5.16
-bash scripts/smoke-test.sh v1.5.16 ruby:3.4.11-slim-trixie runtime
+bash scripts/build.sh v1.5.19
+bash scripts/smoke-test.sh v1.5.19
+bash scripts/smoke-test.sh v1.5.19 ruby:3.4.11-slim-trixie runtime
 ```
 
 Build output in `dist/`:
 
 ```text
-freetds-v1.5.16-debian-trixie-amd64.tar.gz
-freetds-v1.5.16-debian-trixie-amd64.tar.gz.sha256
-freetds-v1.5.16-source.tar.gz
-freetds-v1.5.16-source.tar.gz.sha256
+freetds-v1.5.19-debian-trixie-amd64.tar.gz
+freetds-v1.5.19-debian-trixie-amd64.tar.gz.sha256
+freetds-v1.5.19-source.tar.gz
+freetds-v1.5.19-source.tar.gz.sha256
 ```
 
-`BUILD_JOBS` defaults to 2. Optionally pass a clean upstream Git checkout at the requested tag as the second argument to `scripts/build.sh`; this is how CI builds its checked-out release. Each build uses a disposable container. The source archive contains the unmodified official release source, repackaged as gzip; the binary archive records its URL, digest, upstream tag commit, and build commands in `share/doc/freetds-bin/build-info.txt`. Recipients can rebuild using the recorded configure and make commands. Official release archives already include `configure`.
+`BUILD_JOBS` defaults to 2. Optionally pass a clean upstream Git checkout at the requested tag as the second argument to `scripts/build.sh`; this is how CI builds its checked-out tag. Each build uses a disposable container. There is no separate source-selection setting; every build uses Git.
 
-The `v1.5.16` upstream Git tag identifies itself as version 1.5.17, so release builds deliberately use the official release archive instead of regenerating a distribution from the tag. A version check rejects incorrectly labelled binaries. For an explicit Git-source build of a tag that has no GitHub release, such as `v1.5.19`, run:
+The source archive contains the clean tagged Git source plus generated documentation metadata, so it can be rebuilt without the original `.git` directory. The binary archive records the upstream tag, commit, and build commands in `share/doc/freetds-bin/build-info.txt`. Recipients can bootstrap the source archive with `NOCONFIGURE=1 ./autogen.sh`, then use the recorded configure and make commands.
 
-```sh
-FREETDS_SOURCE=git bash scripts/build.sh v1.5.19
-bash scripts/smoke-test.sh v1.5.19
-```
-
-Git builds additionally use Autotools, gettext, and gperf; they bootstrap with `NOCONFIGURE=1 ./autogen.sh`. Their matching source archive contains the clean Git source plus generated documentation metadata, so it can be rebuilt without the original `.git` directory.
+A version check rejects binaries whose reported version does not match the tag. Some historical upstream tags contain inconsistent version metadata (for example, `v1.5.16` reports 1.5.17); those builds fail explicitly instead of publishing a mislabelled binary. The current `v1.5.19` tag passes the version check.
 
 The development smoke test pins TinyTDS 3.4.1, forces a source build, loads its extension, and checks that it links to `/usr/local/lib/libsybdb.so`. The runtime test loads DB-Library and CT-Library through Ruby's Fiddle. These checks require no database; they do not test queries against SQL Server or Sybase.
 
